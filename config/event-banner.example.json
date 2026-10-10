@@ -1,0 +1,9 @@
+{
+  "label": "SỰ KIỆN",
+  "marquee": [
+    "Dòng chữ chạy thứ nhất",
+    "Dòng chữ chạy thứ hai",
+    "Dòng chữ chạy thứ ba"
+  ],
+  "tapNotice": "Thông báo hiện ra khi người chơi chạm vào banner"
+}
