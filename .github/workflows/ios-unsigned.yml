@@ -57,6 +57,14 @@ jobs:
           fi
           gh release download "$RELEASE_TAG" \
             --repo "$CLIENT_REPO" --pattern ios-xcode.zip
+          # Remove the results of the previous run, so a failed build cannot leave an old .ipa
+          # in the release that looks like the new one.
+          ASSETS=$(gh release view "$RELEASE_TAG" --repo "$CLIENT_REPO" --json assets --jq '.assets[].name')
+          for OLD in DarkBoard-unsigned.ipa unzip.log pod-install.log xcodebuild.log; do
+            if grep -qxF "$OLD" <<< "$ASSETS"; then
+              gh release delete-asset "$RELEASE_TAG" "$OLD" --repo "$CLIENT_REPO" --yes
+            fi
+          done
           if ! unzip -q ios-xcode.zip -d xcode > unzip.log 2>&1; then
             echo "::error::ios-xcode.zip could not be unpacked: see unzip.log in the release."
             exit 1
@@ -129,7 +137,9 @@ jobs:
           GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
         run: |
           for LOG in unzip.log pod-install.log xcodebuild.log; do
-            if [ -f "$LOG" ]; then
-              gh release upload "$RELEASE_TAG" "$LOG" --repo "$CLIENT_REPO" --clobber
+            # -s: a release does not accept an empty file (unzip.log is empty when unzip is clean).
+            if [ -s "$LOG" ]; then
+              gh release upload "$RELEASE_TAG" "$LOG" --repo "$CLIENT_REPO" --clobber \
+                || echo "::warning::$LOG could not be uploaded."
             fi
           done
