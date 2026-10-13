@@ -12,7 +12,8 @@ name: iOS Unsigned Build
 # Nothing from the game is published by it: the Xcode project is read from a release of the
 # private repository and the .ipa and the build log are written back to that same release.
 # The job log on this page is public, so it only says whether each step passed: the output of
-# pod install and xcodebuild goes to pod-install.log and xcodebuild.log in that release.
+# unzip, pod install and xcodebuild (stdout and stderr) goes to unzip.log, pod-install.log and
+# xcodebuild.log in that release.
 #
 # One-time setup: a fine-grained personal access token limited to metischess-client with
 # "Contents: Read and write", saved in this repository as the secret CLIENT_REPO_TOKEN.
@@ -56,7 +57,10 @@ jobs:
           fi
           gh release download "$RELEASE_TAG" \
             --repo "$CLIENT_REPO" --pattern ios-xcode.zip
-          unzip -q ios-xcode.zip -d xcode
+          if ! unzip -q ios-xcode.zip -d xcode > unzip.log 2>&1; then
+            echo "::error::ios-xcode.zip could not be unpacked: see unzip.log in the release."
+            exit 1
+          fi
 
       - name: Xcode version
         run: xcodebuild -version
@@ -97,7 +101,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | tee ../xcodebuild.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
+            build 2>&1 | tee ../xcodebuild.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
           if ! grep -q "BUILD SUCCEEDED" ../xcodebuild.log; then
             echo "::error::Build failed: see xcodebuild.log in the release."
             exit 1
@@ -124,7 +128,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
         run: |
-          for LOG in pod-install.log xcodebuild.log; do
+          for LOG in unzip.log pod-install.log xcodebuild.log; do
             if [ -f "$LOG" ]; then
               gh release upload "$RELEASE_TAG" "$LOG" --repo "$CLIENT_REPO" --clobber
             fi
