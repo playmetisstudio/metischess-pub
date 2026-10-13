@@ -1,0 +1,131 @@
+name: iOS Unsigned Build
+
+# Compiles the Unity-exported Xcode project into an UNSIGNED .ipa on a macOS runner.
+# No Apple Developer account is needed: signing is switched off. The .ipa is re-signed
+# with a free Apple ID at install time (Sideloadly), which is enough for on-device
+# validation (S17-01) but not for TestFlight / App Store.
+#
+# Fallback copy of metischess-client/.github/workflows/ios-unsigned.yml. The build normally runs
+# there; use this one when that repository's Actions quota is used up (a macOS runner spends it
+# ten times as fast), because Actions minutes are free in a public repository. Keep the pod and
+# xcodebuild commands of the two files the same.
+# Nothing from the game is published by it: the Xcode project is read from a release of the
+# private repository and the .ipa and the build log are written back to that same release.
+# The job log on this page is public, so it only says whether each step passed: the output of
+# pod install and xcodebuild goes to pod-install.log and xcodebuild.log in that release.
+#
+# One-time setup: a fine-grained personal access token limited to metischess-client with
+# "Contents: Read and write", saved in this repository as the secret CLIENT_REPO_TOKEN.
+#
+# The Unity step runs locally on Windows (Unity -> iOS export), so this job only pays
+# for the Xcode compile. Upload the export first:
+#   1. Build target iOS in Unity, output builds/ios-xcode/
+#   2. Zip the folder's contents to ios-xcode.zip
+#   3. gh release upload ios-xcode-latest ios-xcode.zip --clobber   (in metischess-client)
+#   4. gh workflow run ios-unsigned.yml --repo playmetisstudio/metischess-pub
+#   5. gh release download ios-xcode-latest --pattern DarkBoard-unsigned.ipa   (in metischess-client)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release in metischess-client that holds ios-xcode.zip"
+        required: true
+        default: "ios-xcode-latest"
+
+permissions: {}
+
+env:
+  CLIENT_REPO: playmetisstudio/metischess-client
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  build:
+    name: Xcode build (unsigned, device)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Download Xcode project
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The secret CLIENT_REPO_TOKEN is not set (see the header of this workflow)."
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" \
+            --repo "$CLIENT_REPO" --pattern ios-xcode.zip
+          unzip -q ios-xcode.zip -d xcode
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      # The Facebook SDK (ADR-0019) arrives as CocoaPods. The Windows export only writes the
+      # Podfile (there is no `pod` on Windows), so the pods are resolved here.
+      - name: Install CocoaPods dependencies
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            pod --version
+            if pod install --repo-update > ../pod-install.log 2>&1; then
+              echo "pod install succeeded"
+            else
+              echo "::error::pod install failed: see pod-install.log in the release."
+              exit 1
+            fi
+          else
+            echo "No Podfile in the export: building the bare Xcode project."
+          fi
+
+      - name: Build (signing off)
+        working-directory: xcode
+        run: |
+          set -o pipefail
+          if [ -d Unity-iPhone.xcworkspace ]; then
+            CONTAINER=(-workspace Unity-iPhone.xcworkspace)
+          else
+            CONTAINER=(-project Unity-iPhone.xcodeproj)
+          fi
+          xcodebuild \
+            "${CONTAINER[@]}" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ../derived \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee ../xcodebuild.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
+          if ! grep -q "BUILD SUCCEEDED" ../xcodebuild.log; then
+            echo "::error::Build failed: see xcodebuild.log in the release."
+            exit 1
+          fi
+
+      - name: Package unsigned .ipa
+        run: |
+          mkdir Payload
+          cp -R derived/Build/Products/Release-iphoneos/*.app Payload/
+          zip -qry DarkBoard-unsigned.ipa Payload
+          ls -lh DarkBoard-unsigned.ipa
+
+      # Artifacts of a public repository can be downloaded by any signed-in GitHub user, so the
+      # .ipa and the full log go back to the private release instead of actions/upload-artifact.
+      - name: Upload .ipa to the private release
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" DarkBoard-unsigned.ipa \
+            --repo "$CLIENT_REPO" --clobber
+
+      - name: Upload build logs to the private release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          for LOG in pod-install.log xcodebuild.log; do
+            if [ -f "$LOG" ]; then
+              gh release upload "$RELEASE_TAG" "$LOG" --repo "$CLIENT_REPO" --clobber
+            fi
+          done
