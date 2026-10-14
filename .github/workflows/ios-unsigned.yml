@@ -73,8 +73,12 @@ jobs:
             exit 1
           fi
 
-      - name: Xcode version
-        run: xcodebuild -version
+      # The runner's hardware, to compare build times with the runs in metischess-client.
+      - name: Runner and Xcode version
+        run: |
+          echo "CPU: $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores ($(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo '?') performance)"
+          echo "RAM: $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+          xcodebuild -version
 
       # The Facebook SDK (ADR-0019) arrives as CocoaPods. The Windows export only writes the
       # Podfile (there is no `pod` on Windows), so the pods are resolved here.
