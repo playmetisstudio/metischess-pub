@@ -7,8 +7,11 @@ name: iOS Unsigned Build
 #
 # Fallback copy of metischess-client/.github/workflows/ios-unsigned.yml. The build normally runs
 # there; use this one when that repository's Actions quota is used up (a macOS runner spends it
-# ten times as fast), because Actions minutes are free in a public repository. Keep the pod and
-# xcodebuild commands of the two files the same.
+# ten times as fast), because Actions minutes are free in a public repository.
+# Differences from the client copy: no dSYM (DEBUG_INFORMATION_FORMAT=dwarf) and no index store,
+# which only serve crash symbolication and the Xcode editor, not a sideloaded test build.
+# metischess-client/tools/ios-build/build-ipa.ps1 runs the Unity export, the upload, this workflow
+# and the download in one command.
 # Nothing from the game is published by it: the Xcode project is read from a release of the
 # private repository and the .ipa and the build log are written back to that same release.
 # The job log on this page is public, so it only says whether each step passed: the output of
@@ -109,6 +112,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             build 2>&1 | tee ../xcodebuild.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
           if ! grep -q "BUILD SUCCEEDED" ../xcodebuild.log; then
             echo "::error::Build failed: see xcodebuild.log in the release."
