@@ -82,6 +82,30 @@ jobs:
 
       # The Facebook SDK (ADR-0019) arrives as CocoaPods. The Windows export only writes the
       # Podfile (there is no `pod` on Windows), so the pods are resolved here.
+      # The Podfile from EDM4U lists two spec sources: the CDN and the full git Specs repo. With
+      # --repo-update the git one is cloned in full on every fresh runner (most of the 10-13 min
+      # this step took). Every pod we use is on the CDN, so the git source is dropped here.
+      - name: Drop the git Specs source from the Podfile
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            sed -i '' "/source 'https:\/\/github.com\/CocoaPods\/Specs'/d" Podfile
+            grep -n "^source" Podfile || true
+          fi
+
+      # Downloaded pods (Facebook, Google Mobile Ads, GoogleSignIn, UMP) and the CDN spec index,
+      # kept between runs while the Podfile does not change. They are public SDKs, nothing of the
+      # game: safe in the cache of a public repository.
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos/trunk
+          key: pods-${{ runner.os }}-${{ hashFiles('xcode/Podfile') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
       - name: Install CocoaPods dependencies
         working-directory: xcode
         run: |
