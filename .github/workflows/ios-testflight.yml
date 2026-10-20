@@ -1,0 +1,218 @@
+name: iOS TestFlight Build
+
+# Compiles the Unity-exported Xcode project into a SIGNED build and uploads it to TestFlight.
+# Plan and decisions: metischess-client/docs/architecture/testflight-pipeline-plan.md.
+#
+# Signing is Xcode's automatic (cloud-managed) signing, driven by an App Store Connect API key:
+# Apple creates and keeps the certificates and profiles, nothing is stored here but the key.
+# The archive is uploaded straight to App Store Connect by `xcodebuild -exportArchive`
+# (destination upload); the signed .ipa never leaves the runner.
+#
+# metischess-client/tools/ios-build/build-ipa.ps1 -TestFlight runs the Unity export, the upload
+# of ios-xcode.zip, this workflow and the wait in one command.
+#
+# The job log on this page is public, so it only says whether each step passed: the output of
+# unzip, pod install and both xcodebuild calls goes to unzip.log, pod-install.log,
+# xcodebuild-archive.log and xcodebuild-export.log in the private release.
+#
+# One-time setup (repository secrets, typed in by the owner, never in a file):
+#   CLIENT_REPO_TOKEN  fine-grained token for metischess-client, Contents: Read and write (exists)
+#   ASC_KEY_ID         App Store Connect API key id (Team key, access Admin)
+#   ASC_ISSUER_ID      App Store Connect API issuer id
+#   ASC_KEY_P8         full text of the AuthKey_<id>.p8 file, BEGIN/END lines included
+#   APPLE_TEAM_ID      team id (Membership details on developer.apple.com)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release in metischess-client that holds ios-xcode.zip"
+        required: true
+        default: "ios-xcode-auto"
+
+permissions: {}
+
+env:
+  CLIENT_REPO: playmetisstudio/metischess-client
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  KEY_DIR: ${{ github.workspace }}/asc-key
+
+jobs:
+  build:
+    name: Xcode archive (signed) and upload to TestFlight
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Check secrets
+        env:
+          CLIENT_REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          MISSING=""
+          for NAME in CLIENT_REPO_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 APPLE_TEAM_ID; do
+            if [ -z "${!NAME}" ]; then MISSING="$MISSING $NAME"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Repository secrets not set:$MISSING (see the header of this workflow)."
+            exit 1
+          fi
+
+      - name: Download Xcode project
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          gh release download "$RELEASE_TAG" \
+            --repo "$CLIENT_REPO" --pattern ios-xcode.zip
+          # Remove this workflow's logs from the previous run, so a failed run cannot be read
+          # with an older run's logs. The unsigned workflow's .ipa is left alone.
+          ASSETS=$(gh release view "$RELEASE_TAG" --repo "$CLIENT_REPO" --json assets --jq '.assets[].name')
+          for OLD in unzip.log pod-install.log xcodebuild-archive.log xcodebuild-export.log; do
+            if grep -qxF "$OLD" <<< "$ASSETS"; then
+              gh release delete-asset "$RELEASE_TAG" "$OLD" --repo "$CLIENT_REPO" --yes
+            fi
+          done
+          if ! unzip -q ios-xcode.zip -d xcode > unzip.log 2>&1; then
+            echo "::error::ios-xcode.zip could not be unpacked: see unzip.log in the release."
+            exit 1
+          fi
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      # Same as ios-unsigned.yml: the EDM4U Podfile also lists the git Specs repo, cloned in full
+      # by --repo-update on every fresh runner; every pod we use is on the CDN.
+      - name: Drop the git Specs source from the Podfile
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            sed -i '' "/source 'https:\/\/github.com\/CocoaPods\/Specs'/d" Podfile
+            grep -n "^source" Podfile || true
+          fi
+
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos/trunk
+          key: pods-${{ runner.os }}-${{ hashFiles('xcode/Podfile') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Install CocoaPods dependencies
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            pod --version
+            if pod install --repo-update > ../pod-install.log 2>&1; then
+              echo "pod install succeeded"
+            else
+              echo "::error::pod install failed: see pod-install.log in the release."
+              exit 1
+            fi
+          else
+            echo "No Podfile in the export: building the bare Xcode project."
+          fi
+
+      - name: Write the App Store Connect key
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          mkdir -p "$KEY_DIR"
+          chmod 700 "$KEY_DIR"
+          printf '%s\n' "$ASC_KEY_P8" > "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+
+      # DEVELOPMENT_TEAM and CODE_SIGN_STYLE are passed here so a Unity or EDM4U setting in the
+      # export cannot switch signing off or to another team.
+      - name: Archive (signed)
+        working-directory: xcode
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          if [ -d Unity-iPhone.xcworkspace ]; then
+            CONTAINER=(-workspace Unity-iPhone.xcworkspace)
+          else
+            CONTAINER=(-project Unity-iPhone.xcodeproj)
+          fi
+          xcodebuild \
+            "${CONTAINER[@]}" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath ../DarkBoard.xcarchive \
+            -derivedDataPath ../derived \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            archive > ../xcodebuild-archive.log 2>&1 || true
+          if ! grep -q "ARCHIVE SUCCEEDED" ../xcodebuild-archive.log; then
+            echo "::error::Archive failed: see xcodebuild-archive.log in the release."
+            exit 1
+          fi
+          echo "ARCHIVE SUCCEEDED"
+
+      - name: Export and upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath DarkBoard.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > xcodebuild-export.log 2>&1 || true
+          if ! grep -q "EXPORT SUCCEEDED" xcodebuild-export.log; then
+            echo "::error::Export or upload failed: see xcodebuild-export.log in the release."
+            exit 1
+          fi
+          echo "Uploaded to App Store Connect; TestFlight processes it next."
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$KEY_DIR"
+
+      - name: Upload build logs to the private release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          for LOG in unzip.log pod-install.log xcodebuild-archive.log xcodebuild-export.log; do
+            # -s: a release does not accept an empty file (unzip.log is empty when unzip is clean).
+            if [ -s "$LOG" ]; then
+              gh release upload "$RELEASE_TAG" "$LOG" --repo "$CLIENT_REPO" --clobber \
+                || echo "::warning::$LOG could not be uploaded."
+            fi
+          done
