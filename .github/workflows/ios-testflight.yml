@@ -80,8 +80,17 @@ jobs:
             exit 1
           fi
 
-      - name: Xcode version
-        run: xcodebuild -version
+      # App Store Connect accepts only builds made with the iOS 26 SDK or later (Xcode 26+); the
+      # runner image defaults to Xcode 16.4. Pick the newest Xcode 26.x the image ships.
+      - name: Select Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::No Xcode 26 on this runner image; App Store Connect rejects older SDKs."
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
 
       # Same as ios-unsigned.yml: the EDM4U Podfile also lists the git Specs repo, cloned in full
       # by --repo-update on every fresh runner; every pod we use is on the CDN.
