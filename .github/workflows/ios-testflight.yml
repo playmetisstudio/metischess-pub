@@ -136,6 +136,42 @@ jobs:
           chmod 700 "$KEY_DIR"
           printf '%s\n' "$ASC_KEY_P8" > "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
           chmod 600 "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          # Prints an App Store Connect API token (ES256 JWT, 15 min) for curl.
+          cat > "$KEY_DIR/asc-token.sh" <<'EOF'
+          set -euo pipefail
+          b64url() { base64 | tr -d '\n=' | tr '+/' '-_'; }
+          NOW=$(date +%s)
+          HEADER=$(printf '{"alg":"ES256","kid":"%s","typ":"JWT"}' "$ASC_KEY_ID" | b64url)
+          PAYLOAD=$(printf '{"iss":"%s","iat":%d,"exp":%d,"aud":"appstoreconnect-v1"}' \
+            "$ASC_ISSUER_ID" "$NOW" $((NOW + 900)) | b64url)
+          # openssl gives a DER signature; a JWT needs the raw 32-byte r and s, left-padded.
+          SIG=$(printf '%s.%s' "$HEADER" "$PAYLOAD" \
+            | openssl dgst -sha256 -sign "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8" \
+            | openssl asn1parse -inform DER \
+            | awk -F: '/INTEGER/ { printf "%064s", $NF }' | tr ' ' '0' \
+            | xxd -r -p | b64url)
+          printf '%s.%s.%s\n' "$HEADER" "$PAYLOAD" "$SIG"
+          EOF
+
+      # With automatic signing, the archive makes a new Apple Development certificate on every
+      # fresh runner, and its private key dies with the runner. The ids that exist before the
+      # archive are kept so "Revoke this run's development certificates" removes only the ones
+      # this run created (the Sideloadly certificate and any older one are left alone).
+      - name: List development certificates
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -o pipefail
+          TOKEN=$(bash "$KEY_DIR/asc-token.sh")
+          if curl -sfg -H "Authorization: Bearer $TOKEN" \
+              "https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=DEVELOPMENT,IOS_DEVELOPMENT&fields[certificates]=certificateType&limit=200" \
+              | jq -r '.data[].id' | sort > "$RUNNER_TEMP/dev-certs-before.txt"; then
+            echo "Development certificates before the archive: $(wc -l < "$RUNNER_TEMP/dev-certs-before.txt" | tr -d ' ')"
+          else
+            rm -f "$RUNNER_TEMP/dev-certs-before.txt"
+            echo "::warning::Could not list certificates; this run's development certificate will not be revoked."
+          fi
 
       # DEVELOPMENT_TEAM and CODE_SIGN_STYLE are passed here so a Unity or EDM4U setting in the
       # export cannot switch signing off or to another team.
@@ -208,6 +244,49 @@ jobs:
             exit 1
           fi
           echo "Uploaded to App Store Connect; TestFlight processes it next."
+
+      # The upload is signed by the cloud-managed Distribution certificate, so revoking the
+      # development certificate the archive made does not touch the build. Runs after a failed
+      # archive too (the certificate may exist already); never without the list from before.
+      - name: Revoke this run's development certificates
+        if: always()
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -o pipefail
+          BEFORE="$RUNNER_TEMP/dev-certs-before.txt"
+          if [ ! -f "$BEFORE" ] || [ ! -f "$KEY_DIR/asc-token.sh" ]; then
+            echo "No certificate list from before the archive: nothing revoked."
+            exit 0
+          fi
+          TOKEN=$(bash "$KEY_DIR/asc-token.sh")
+          if ! curl -sfg -H "Authorization: Bearer $TOKEN" \
+              "https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=DEVELOPMENT,IOS_DEVELOPMENT&fields[certificates]=certificateType&limit=200" \
+              | jq -r '.data[].id' | sort > "$RUNNER_TEMP/dev-certs-after.txt"; then
+            echo "::warning::Could not list certificates; this run's development certificate was not revoked."
+            exit 0
+          fi
+          NEW=$(comm -13 "$BEFORE" "$RUNNER_TEMP/dev-certs-after.txt")
+          COUNT=$(printf '%s' "$NEW" | grep -c . || true)
+          # A run makes one (archive and export could make two); more means something else is
+          # creating them at the same time: leave them all.
+          if [ "$COUNT" -gt 2 ]; then
+            echo "::warning::$COUNT new development certificates since the archive started; none revoked, check Certificates on developer.apple.com."
+            exit 0
+          fi
+          REVOKED=0
+          for ID in $NEW; do
+            STATUS=$(curl -sg -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $TOKEN" \
+              "https://api.appstoreconnect.apple.com/v1/certificates/$ID")
+            if [ "$STATUS" = "204" ]; then
+              REVOKED=$((REVOKED + 1))
+            else
+              echo "::warning::A development certificate could not be revoked (HTTP $STATUS)."
+            fi
+          done
+          echo "Development certificates made by this run: $COUNT, revoked: $REVOKED"
 
       - name: Remove the key
         if: always()
