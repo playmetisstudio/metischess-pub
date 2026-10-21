@@ -1,0 +1,216 @@
+name: iOS Simulator Build
+
+# Compiles the Unity-exported Xcode project for the iOS SIMULATOR and zips the .app. Meta's App
+# Review (Facebook Login) does not accept TestFlight: for an app that is not on the App Store
+# yet it asks for "a simulator build file". This is that file.
+#
+# The export must be made with the Simulator SDK (Unity: Player Settings > iOS > Target SDK);
+# a device export does not link for the simulator. metischess-client/tools/ios-build/build-ipa.ps1
+# -Simulator makes that export, uploads it, runs this workflow and downloads the result.
+#
+# Signing: ad hoc ("Sign to Run Locally", identity "-"), which needs no Apple account and is
+# what Xcode itself does for a simulator build without a team. Unsigned, the Keychain calls
+# (guest identity) would fail with errSecMissingEntitlement on the simulator.
+#
+# Nothing from the game is published by it, same as ios-unsigned.yml: the Xcode project is read
+# from a release of the private repository, and the zipped .app, the launch screenshot and the
+# logs are written back to that same release. The job log on this page is public, so it only
+# says whether each step passed: tool output goes to *.log files in that release.
+#
+# Secret: CLIENT_REPO_TOKEN (see ios-unsigned.yml). No Apple secret is used.
+#
+#   gh workflow run ios-simulator.yml --repo playmetisstudio/metischess-pub -f release_tag=ios-xcode-sim
+#   gh release download ios-xcode-sim --repo playmetisstudio/metischess-client --pattern DarkBoard-simulator.zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release in metischess-client that holds ios-xcode.zip (a Simulator SDK export)"
+        required: true
+        default: "ios-xcode-sim"
+
+permissions: {}
+
+env:
+  CLIENT_REPO: playmetisstudio/metischess-client
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  build:
+    name: Xcode build (simulator, ad hoc)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Download Xcode project
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The secret CLIENT_REPO_TOKEN is not set (see the header of ios-unsigned.yml)."
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" \
+            --repo "$CLIENT_REPO" --pattern ios-xcode.zip
+          # Remove the results of the previous run, so a failed build cannot leave an old zip
+          # in the release that looks like the new one.
+          ASSETS=$(gh release view "$RELEASE_TAG" --repo "$CLIENT_REPO" --json assets --jq '.assets[].name')
+          for OLD in DarkBoard-simulator.zip sim-launch.png unzip.log pod-install.log xcodebuild.log simulator.log; do
+            if grep -qxF "$OLD" <<< "$ASSETS"; then
+              gh release delete-asset "$RELEASE_TAG" "$OLD" --repo "$CLIENT_REPO" --yes
+            fi
+          done
+          if ! unzip -q ios-xcode.zip -d xcode > unzip.log 2>&1; then
+            echo "::error::ios-xcode.zip could not be unpacked: see unzip.log in the release."
+            exit 1
+          fi
+
+      # A device export fails late in xcodebuild ("building for iOS Simulator, but linking in object
+      # file built for iOS"). Unity writes SDKROOT = iphonesimulator only for a Simulator SDK export.
+      - name: Check the export targets the simulator
+        working-directory: xcode
+        run: |
+          if grep -q "SDKROOT = iphonesimulator" Unity-iPhone.xcodeproj/project.pbxproj; then
+            echo "Simulator SDK export."
+          else
+            echo "::error::This export was made for devices, not the simulator (build-ipa.ps1 -Simulator)."
+            exit 1
+          fi
+
+      - name: Runner and Xcode version
+        run: |
+          echo "CPU: $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores"
+          echo "RAM: $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+          xcodebuild -version
+
+      # Same as ios-unsigned.yml: every pod is on the CDN, the full git Specs clone is not needed.
+      - name: Drop the git Specs source from the Podfile
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            sed -i '' "/source 'https:\/\/github.com\/CocoaPods\/Specs'/d" Podfile
+            grep -n "^source" Podfile || true
+          fi
+
+      # Public SDKs only (Facebook, Google Mobile Ads, GoogleSignIn, UMP): safe in a public cache.
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos/trunk
+          key: pods-${{ runner.os }}-${{ hashFiles('xcode/Podfile') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Install CocoaPods dependencies
+        working-directory: xcode
+        run: |
+          if [ -f Podfile ]; then
+            pod --version
+            if pod install --repo-update > ../pod-install.log 2>&1; then
+              echo "pod install succeeded"
+            else
+              echo "::error::pod install failed: see pod-install.log in the release."
+              exit 1
+            fi
+          else
+            echo "No Podfile in the export: building the bare Xcode project."
+          fi
+
+      # Both simulator architectures (Unity sets ARCHS = "x86_64 arm64"; ONLY_ACTIVE_ARCH=NO keeps
+      # both for the pods too): Meta's reviewers may run an Intel or an Apple silicon Mac.
+      # DEVELOPMENT_TEAM is emptied so the ad hoc identity is used for every target, pods included.
+      - name: Build (simulator, ad hoc signing)
+        working-directory: xcode
+        run: |
+          set -o pipefail
+          if [ -d Unity-iPhone.xcworkspace ]; then
+            CONTAINER=(-workspace Unity-iPhone.xcworkspace)
+          else
+            CONTAINER=(-project Unity-iPhone.xcodeproj)
+          fi
+          xcodebuild \
+            "${CONTAINER[@]}" \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ../derived \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build 2>&1 | tee ../xcodebuild.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
+          if ! grep -q "BUILD SUCCEEDED" ../xcodebuild.log; then
+            echo "::error::Build failed: see xcodebuild.log in the release."
+            exit 1
+          fi
+
+      # Meta asks for the .app zipped. ditto keeps the bundle's symlinks and the non-ASCII
+      # product name intact (zip -r can mangle both).
+      - name: Package the .app
+        run: |
+          PRODUCTS=derived/Build/Products/Release-iphonesimulator
+          APPS=$(find "$PRODUCTS" -maxdepth 1 -name '*.app' -type d)
+          if [ "$(printf '%s\n' "$APPS" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one .app in the build products."
+            exit 1
+          fi
+          echo "APP_PATH=$APPS" >> "$GITHUB_ENV"
+          ditto -c -k --sequesterRsrc --keepParent "$APPS" DarkBoard-simulator.zip
+          ls -lh DarkBoard-simulator.zip
+
+      # The reviewer's first impression: the app must install and stay up on a fresh simulator.
+      # Boots an available iPhone, installs, launches, waits, then checks the process is alive
+      # and takes a screenshot (goes to the private release, not to this page).
+      - name: Launch check on a simulator
+        run: |
+          {
+            BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/Info.plist")
+            DEVICE=$(xcrun simctl list devices available -j |
+              jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | startswith("iPhone"))] | last | .udid')
+            echo "device: $DEVICE"
+            xcrun simctl boot "$DEVICE"
+            xcrun simctl bootstatus "$DEVICE" -b
+            xcrun simctl install "$DEVICE" "$APP_PATH"
+            xcrun simctl launch "$DEVICE" "$BUNDLE_ID"
+            sleep 45
+            xcrun simctl io "$DEVICE" screenshot sim-launch.png
+            if xcrun simctl spawn "$DEVICE" launchctl list | grep -q "$BUNDLE_ID"; then
+              echo "RESULT: running after 45 s"
+            else
+              echo "RESULT: not running after 45 s"
+            fi
+          } > simulator.log 2>&1 || true
+          if grep -q "RESULT: running" simulator.log; then
+            echo "The app is still running 45 s after launch."
+          else
+            echo "::error::The app did not stay up on the simulator: see simulator.log and sim-launch.png in the release."
+            exit 1
+          fi
+
+      # Artifacts of a public repository can be downloaded by any signed-in GitHub user, so the
+      # zip and the logs go back to the private release instead of actions/upload-artifact.
+      - name: Upload the zipped .app to the private release
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" DarkBoard-simulator.zip \
+            --repo "$CLIENT_REPO" --clobber
+
+      - name: Upload logs and screenshot to the private release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          for F in unzip.log pod-install.log xcodebuild.log simulator.log sim-launch.png; do
+            if [ -s "$F" ]; then
+              gh release upload "$RELEASE_TAG" "$F" --repo "$CLIENT_REPO" --clobber \
+                || echo "::warning::$F could not be uploaded."
+            fi
+          done
