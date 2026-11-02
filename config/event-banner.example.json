@@ -5,5 +5,7 @@
     "Dòng chữ chạy thứ hai",
     "Dòng chữ chạy thứ ba"
   ],
-  "tapNotice": "Thông báo hiện ra khi người chơi chạm vào banner"
+  "tapNotice": "Thông báo hiện ra khi người chơi chạm vào banner",
+  "hotCard": "practice",
+  "hotLabel": "HOT"
 }
