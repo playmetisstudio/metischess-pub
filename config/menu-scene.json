@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "image": "",
+  "version": 2,
+  "image": "https://playmetisstudio.github.io/metischess-pub/config/menu-bg-nho-que.png",
   "scale": 0.42,
   "offsetY": -49
 }
