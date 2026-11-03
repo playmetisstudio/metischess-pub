@@ -25,3 +25,21 @@ Rules
   keeps showing the last good version.
 - Check the result by opening
   `https://playmetisstudio.github.io/metischess-pub/config/event-banner.json` in a browser.
+
+# config/menu-scene.json
+
+The painted courtyard behind the top half of the main menu (main-menu.md Rule 10d). Changing the
+picture needs no app build.
+
+| Field | Required | Meaning | Limit |
+|---|---|---|---|
+| `version` | yes | Raise it every time the picture changes; the app downloads the picture again only then | whole number ≥ 1 |
+| `image` | no | HTTPS address of the picture (PNG or JPG, e.g. a file in this repo's `config/`). **Empty = the Văn Miếu picture built into the app.** | HTTPS only |
+| `scale` | no | Points of picture per pixel (the built-in 1600 × 1280 picture uses 0.42) | 0.1 – 2, default 0.42 |
+| `offsetY` | no | Top of the picture relative to the top of the screen, in points (negative = above). The same on every screen | −600 – 200, default −49 |
+
+Rules
+- A new picture keeps the template: a pale area behind the header (top ~120 points), a quiet courtyard
+  behind the players and the small board (about 230–430 points down on an iPhone 14), wide enough for an iPad.
+- The app keeps the last good picture on the device; any failure (bad JSON, `http://`, a file that is not a
+  picture) keeps what is showing. Needs an app build from 2026-11-04 or later; older builds ignore the file.
