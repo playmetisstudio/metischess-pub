@@ -7,6 +7,9 @@ name: iOS TestFlight Build
 # Apple creates and keeps the certificates and profiles, nothing is stored here but the key.
 # The archive is uploaded straight to App Store Connect by `xcodebuild -exportArchive`
 # (destination upload); the signed .ipa never leaves the runner.
+# When the archive succeeds but the export/upload fails, the archive is zipped into the private
+# release as DarkBoard.xcarchive.zip, so ios-testflight-upload.yml can retry only the upload
+# (a few minutes) instead of archiving again.
 #
 # metischess-client/tools/ios-build/build-ipa.ps1 -TestFlight runs the Unity export, the upload
 # of ios-xcode.zip, this workflow and the wait in one command.
@@ -67,10 +70,11 @@ jobs:
         run: |
           gh release download "$RELEASE_TAG" \
             --repo "$CLIENT_REPO" --pattern ios-xcode.zip
-          # Remove this workflow's logs from the previous run, so a failed run cannot be read
-          # with an older run's logs. The unsigned workflow's .ipa is left alone.
+          # Remove this workflow's logs and kept archive from the previous run, so a failed run
+          # cannot be read with an older run's logs and an upload-only retry cannot send an older
+          # build. The unsigned workflow's .ipa is left alone.
           ASSETS=$(gh release view "$RELEASE_TAG" --repo "$CLIENT_REPO" --json assets --jq '.assets[].name')
-          for OLD in unzip.log pod-install.log xcodebuild-archive.log xcodebuild-export.log; do
+          for OLD in unzip.log pod-install.log xcodebuild-archive.log xcodebuild-export.log DarkBoard.xcarchive.zip; do
             if grep -qxF "$OLD" <<< "$ASSETS"; then
               gh release delete-asset "$RELEASE_TAG" "$OLD" --repo "$CLIENT_REPO" --yes
             fi
@@ -176,6 +180,7 @@ jobs:
       # DEVELOPMENT_TEAM and CODE_SIGN_STYLE are passed here so a Unity or EDM4U setting in the
       # export cannot switch signing off or to another team.
       - name: Archive (signed)
+        id: archive
         working-directory: xcode
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -244,6 +249,24 @@ jobs:
             exit 1
           fi
           echo "Uploaded to App Store Connect; TestFlight processes it next."
+
+      # Only when the archive is good and the export/upload is not: a successful run spends no
+      # minutes on it. ios-testflight-upload.yml takes it from here.
+      - name: Keep the archive for an upload-only retry
+        if: failure() && steps.archive.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+        run: |
+          ditto -c -k --keepParent DarkBoard.xcarchive DarkBoard.xcarchive.zip
+          SIZE=$(stat -f %z DarkBoard.xcarchive.zip)
+          echo "DarkBoard.xcarchive.zip: $((SIZE / 1048576)) MB"
+          # A release asset must be under 2 GiB.
+          if [ "$SIZE" -ge 2000000000 ]; then
+            echo "::warning::The archive is too large for a release asset; a retry must archive again."
+            exit 0
+          fi
+          gh release upload "$RELEASE_TAG" DarkBoard.xcarchive.zip --repo "$CLIENT_REPO" --clobber \
+            || echo "::warning::The archive could not be kept; a retry must archive again."
 
       # The upload is signed by the cloud-managed Distribution certificate, so revoking the
       # development certificate the archive made does not touch the build. Runs after a failed
