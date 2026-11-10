@@ -26,6 +26,39 @@ Rules
 - Check the result by opening
   `https://playmetisstudio.github.io/metischess-pub/config/event-banner.json` in a browser.
 
+## Maintenance window (`maintenance`)
+
+Announces a server maintenance (main-menu.md Rule 8b). Add the object to `event-banner.json`, keeping the other
+fields; **remove it to cancel**.
+
+```json
+"maintenance": {
+  "start": "2026-11-11T00:30:00+07:00",
+  "end": "2026-11-11T08:00:00+07:00",
+  "reason": "Nâng cấp máy chủ"
+}
+```
+
+| Field | Required | Meaning | Limit |
+|---|---|---|---|
+| `start` | yes | When online play closes. `YYYY-MM-DDTHH:MM:SS+07:00`; without `+07:00` it is read as Vietnam time | — |
+| `end` | yes | When it opens again; must be after `start` | at most 3 days after `start` |
+| `reason` | no | The small line under the times. **Leave it out and it reads "Nâng cấp máy chủ".** | ≤ 40 characters |
+
+What the players see
+- **Before `start`**: once per app launch, a "Máy chủ sắp bảo trì" card with the times ("00:30 – 08:00, Thứ Tư 11/11");
+  online play stays open.
+- **From `start` to `end`**: Cờ Úp, Cờ Tướng, Shop, Xếp hạng, Hồ sơ and xem cờ are locked even if the server is still on;
+  a "Máy chủ đang bảo trì" card (once per launch, and again on every tap on something locked) with buttons to Cờ Thế
+  and Luyện tập, which keep working.
+- **At `end`**: the menu opens again by itself (checked every minute) with "Đã hết bảo trì, chúc bạn chơi vui!".
+
+Rules
+- Times are compared with the phone's clock. Publish the window early (Pages and the app cache up to ~10 minutes).
+- A window whose `end` is not after `start`, or that is longer than 3 days, is ignored (a typo cannot lock the game).
+- Stopping the server is still done separately (phone Shortcut / scheduler); this file only tells the players.
+- Needs an app build from 2026-11-10 or later; older builds ignore the object and say "mất kết nối" while the server is off.
+
 # config/menu-scene.json
 
 The painted courtyard behind the top half of the main menu (main-menu.md Rule 10d). Changing the

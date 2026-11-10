@@ -7,5 +7,10 @@
   ],
   "tapNotice": "Thông báo hiện ra khi người chơi chạm vào banner",
   "hotCard": "practice",
-  "hotLabel": "HOT"
+  "hotLabel": "HOT",
+  "maintenance": {
+    "start": "2026-11-11T00:30:00+07:00",
+    "end": "2026-11-11T08:00:00+07:00",
+    "reason": "Nâng cấp máy chủ"
+  }
 }
